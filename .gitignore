@@ -1,0 +1,16 @@
+# 官方数据和可重建预处理产物体积较大，不提交到版本库。
+data/raw/
+data/processed/
+
+# 训练权重、可视化和日志。
+outputs/
+
+# Python临时文件。
+__pycache__/
+*.py[cod]
+
+# IDE与系统文件。
+.idea/
+.DS_Store
+Thumbs.db
+

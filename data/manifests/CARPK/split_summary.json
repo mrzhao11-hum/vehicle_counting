@@ -1,0 +1,58 @@
+{
+  "data_root": "E:\\车辆计数\\data\\raw\\CARPK\\CARPK_devkit\\data",
+  "validation_sequences": [
+    "20161029_NTU"
+  ],
+  "available_official_train_sequences": [
+    "20160331_NTU",
+    "20160524_GF1",
+    "20160524_GF2",
+    "20161029_NTU",
+    "20161030_GF1",
+    "20161030_GF2"
+  ],
+  "splits": {
+    "train": {
+      "images": 827,
+      "vehicles": 35502,
+      "sequences": {
+        "20160524_GF1": 189,
+        "20161030_GF2": 155,
+        "20160524_GF2": 193,
+        "20161030_GF1": 209,
+        "20160331_NTU": 81
+      }
+    },
+    "val": {
+      "images": 162,
+      "vehicles": 6772,
+      "sequences": {
+        "20161029_NTU": 162
+      }
+    },
+    "test": {
+      "images": 459,
+      "vehicles": 47500,
+      "sequences": {
+        "20161225_TPZ": 459
+      }
+    },
+    "train_full": {
+      "images": 989,
+      "vehicles": 42274,
+      "sequences": {
+        "20160524_GF1": 189,
+        "20161029_NTU": 162,
+        "20161030_GF2": 155,
+        "20160524_GF2": 193,
+        "20161030_GF1": 209,
+        "20160331_NTU": 81
+      }
+    }
+  },
+  "notes": [
+    "train和val来自官方train，test保持官方459张不变。",
+    "validation按完整拍摄序列留出，降低相邻帧泄漏风险。",
+    "开发时使用train/val；确定超参数后可用train_full按固定epoch重训练。"
+  ]
+}

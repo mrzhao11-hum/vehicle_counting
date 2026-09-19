@@ -1,0 +1,9 @@
+# Install PyTorch separately to match the server CUDA runtime.
+numpy
+scipy
+h5py
+pillow
+matplotlib
+opencv-python
+PyYAML
+tqdm
