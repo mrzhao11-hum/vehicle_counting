@@ -1,0 +1,46 @@
+# CARPK固定高斯核CSRNet教师基线。
+# 所有相对路径都以项目根目录（~/vehicle_counting）为基准。
+
+experiment:
+  name: carpk_teacher_fixed_sigma8
+  output_dir: outputs/carpk/b0_teacher_fixed_sigma8
+  seed: 42
+  device: cuda:0
+  # true更便于逐次复现实验，但会降低卷积速度；基础调试通过后可保持false。
+  deterministic: false
+
+data:
+  data_root: data/raw/CARPK/CARPK_devkit/data
+  target_root: data/processed/CARPK/fixed_sigma
+  train_manifest: data/manifests/CARPK/train.json
+  val_manifest: data/manifests/CARPK/val.json
+  test_manifest: data/manifests/CARPK/test.json
+  train_full_manifest: data/manifests/CARPK/train_full.json
+  output_stride: 8
+  # 第一版使用小batch，先保证数值和显存稳定，再根据4090显存尝试增大。
+  batch_size: 1
+  validation_batch_size: 1
+  workers: 4
+  horizontal_flip_probability: 0.5
+
+model:
+  # 首次训练会使用torchvision下载或读取缓存中的ImageNet VGG16权重。
+  pretrained_frontend: true
+
+training:
+  epochs: 200
+  learning_rate: 0.00001
+  weight_decay: 0.0005
+  # 与原CSRNet/SKT的sum-MSE一致，再除以batch大小保持不同batch可比。
+  loss_reduction: batch_mean_sum
+  amp: true
+  print_frequency: 20
+  gradient_clip_norm: null
+  # 验证MAE连续若干epoch不改善时降低学习率。
+  lr_factor: 0.5
+  lr_patience: 10
+  minimum_learning_rate: 0.0000001
+
+evaluation:
+  save_visualizations: 20
+  save_worst_visualizations: 20

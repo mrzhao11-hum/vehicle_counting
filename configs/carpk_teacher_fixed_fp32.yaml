@@ -1,0 +1,58 @@
+# CARPK固定高斯核CSRNet教师对照实验：FP32 + 固定学习率。
+#
+# 该配置从carpk_teacher_fixed.yaml复制而来，只改变两项训练策略：
+#   1. 关闭AMP，所有前向、损失和反向传播均使用FP32；
+#   2. 关闭学习率调度器，80轮始终使用Adam学习率1e-5。
+#
+# 数据划分、网络结构、初始化、损失函数、数据增强、batch size和实际训练轮数
+# 均与原B0保持一致，因此可以用于判断AMP和学习率调度策略的影响。
+
+experiment:
+  name: carpk_teacher_fixed_sigma8_fp32_fixed_lr
+  # 使用独立目录，禁止覆盖原B0的日志和权重。
+  output_dir: outputs/carpk/b0_teacher_fixed_sigma8_fp32_fixed_lr
+  seed: 42
+  device: cuda:0
+  deterministic: false
+
+data:
+  data_root: data/raw/CARPK/CARPK_devkit/data
+  target_root: data/processed/CARPK/fixed_sigma
+  train_manifest: data/manifests/CARPK/train.json
+  val_manifest: data/manifests/CARPK/val.json
+  test_manifest: data/manifests/CARPK/test.json
+  train_full_manifest: data/manifests/CARPK/train_full.json
+  output_stride: 8
+  batch_size: 1
+  validation_batch_size: 1
+  workers: 4
+  horizontal_flip_probability: 0.5
+
+model:
+  # 使用ImageNet预训练VGG16参数初始化CSRNet前端。
+  pretrained_frontend: true
+
+training:
+  # 原B0训练日志包含epoch 1至80，本对照实验也固定训练80轮。
+  epochs: 200
+  # 保持原B0的Adam初始学习率，只取消后续动态调整。
+  learning_rate: 0.00001
+  weight_decay: 0.0005
+  # batch=1时等价于对整张密度图的像素平方误差求和。
+  loss_reduction: batch_mean_sum
+
+  # 对照实验的两个核心设置。
+  amp: false
+  lr_scheduler: none
+
+  print_frequency: 20
+  gradient_clip_norm: null
+
+  # lr_scheduler为none时以下参数不会参与训练；保留字段便于与原配置核对。
+  lr_factor: 0.5
+  lr_patience: 10
+  minimum_learning_rate: 0.0000001
+
+evaluation:
+  save_visualizations: 20
+  save_worst_visualizations: 20

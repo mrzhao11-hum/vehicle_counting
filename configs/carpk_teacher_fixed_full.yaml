@@ -1,0 +1,43 @@
+# CARPK正式B0：使用官方全部989张训练图，固定训练预算，不用验证集选模。
+# 开发阶段最佳模型为13轮，即13*827=10751次更新；完整训练使用11轮，
+# 即11*989=10879次更新。两者优化步数近似相等。
+
+experiment:
+  name: carpk_teacher_fixed_sigma8_full
+  output_dir: outputs/carpk/b0_teacher_fixed_sigma8_full
+  seed: 42
+  device: cuda:0
+  deterministic: false
+
+data:
+  data_root: data/raw/CARPK/CARPK_devkit/data
+  target_root: data/processed/CARPK/fixed_sigma
+  # 正式训练使用CARPK官方完整训练集：827 train + 162 val = 989。
+  train_manifest: data/manifests/CARPK/train_full.json
+  # 保留这些清单供evaluate_teacher.py按split独立评估；训练时不读取val。
+  val_manifest: data/manifests/CARPK/val.json
+  test_manifest: data/manifests/CARPK/test.json
+  train_full_manifest: data/manifests/CARPK/train_full.json
+  output_stride: 8
+  batch_size: 1
+  validation_batch_size: 1
+  workers: 4
+  horizontal_flip_probability: 0.5
+
+model:
+  pretrained_frontend: true
+
+training:
+  # 正式训练期间不再查看验证集或测试集选择轮次。
+  epochs: 11
+  validation_enabled: false
+  learning_rate: 0.00001
+  weight_decay: 0.0005
+  loss_reduction: batch_mean_sum
+  amp: true
+  print_frequency: 20
+  gradient_clip_norm: null
+
+evaluation:
+  save_visualizations: 20
+  save_worst_visualizations: 20

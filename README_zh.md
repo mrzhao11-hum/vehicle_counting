@@ -2,7 +2,9 @@
 
 本目录 `E:\车辆计数` 是后续车辆计数工作的唯一开发目录。另一个项目 `E:\SKT-master\SKT-master` 保留为只读参考实现，不再直接加入车辆数据处理、车辆损失或车辆训练逻辑。
 
-当前状态：CARPK原始数据已经完成完整性核验；标注解析、数据检查与可视化、固定划分、固定/自适应密度图生成和PyTorch Dataset已经实现。教师训练、学生训练、蒸馏和测试入口仍待后续阶段实现。本文件中尚未实现部分的“规划命令”仍用于约定后续接口。
+当前状态：CARPK原始数据、密度标签与固定划分已经完成；B0完整CSRNet教师
+训练和测试已经跑通。B1的1/4-CSRNet学生模型、无蒸馏训练、独立评估、结构
+检查与复杂度统计已经实现；原始SKT蒸馏仍属于下一阶段。
 
 ## 1. 项目目标
 
@@ -81,30 +83,27 @@ E:/
 │   ├── generate_carpk_density.py
 │   └── parse_uavdt.py              # 后续实现
 ├── models/
-│   ├── teacher_csrnet.py
-│   ├── student_csrnet.py
-│   └── feature_hooks.py
+│   └── csrnet.py                  # CSRNet教师、1/4学生和显式中间特征
 ├── losses/
 │   ├── density_loss.py
-│   ├── output_distill_loss.py
-│   └── structured_distill_loss.py
+│   └── density.py                 # 已实现加权/掩码密度MSE
 ├── engine/
-│   ├── trainer.py
-│   ├── evaluator.py
-│   └── predictor.py
-├── utils/
-│   ├── checkpoint.py
-│   ├── metrics.py
-│   ├── visualization.py
-│   └── reproducibility.py
+│   ├── trainer.py                 # 已实现教师单epoch训练
+│   ├── evaluator.py               # 已实现MAE/RMSE、CSV与可视化
+│   └── common.py                  # checkpoint、随机种子和指标工具
 ├── scripts/
 │   └── README.md
 ├── docs/
 │   ├── VEHICLE_COUNTING_ROADMAP_zh.md
 │   └── SKT_REFERENCE_zh.md
 ├── outputs/                  # checkpoint、日志、CSV、可视化
-├── train_teacher.py
-├── train_student.py
+├── check_carpk_data.py            # 已实现DataLoader快速检查
+├── train_teacher.py               # 已实现教师训练和8图过拟合
+├── evaluate_teacher.py            # 已实现教师独立评估
+├── train_student.py              # B1无蒸馏学生训练
+├── evaluate_student.py           # B1/B2学生独立评估
+├── check_models.py               # 教师/学生结构快速检查
+├── analyze_model.py              # 参数、FLOPs、体积和延迟统计
 ├── train_distill.py
 ├── evaluate.py
 └── infer.py
@@ -268,22 +267,71 @@ sigma_y = clip(alpha_y * bbox_height, sigma_min, sigma_max)
 
 教师负责建立车辆计数上限。它可以用 ImageNet VGG16 初始化前端，但必须在目标车辆训练集上训练。原 SKT 人群 checkpoint 不能直接当作车辆教师的最终权重。
 
-每个 epoch 后只在 validation 计算 MAE/RMSE，以 validation MAE 保存 best checkpoint。训练结束后再加载 best checkpoint 测试一次。
+开发阶段每个 epoch 后只在 validation 计算 MAE/RMSE，以 validation MAE 保存
+best checkpoint。确定训练配置和最佳轮数后，使用官方989张完整训练集固定
+轮数重新训练，不再使用validation选模，最后再独立测试。
 
-规划命令：
+先运行8张图过拟合检查：
 
 ```bash
-python train_teacher.py --config configs/carpk_baseline.yaml
+python train_teacher.py \
+  --config configs/carpk_teacher_fixed.yaml \
+  --overfit-samples 8 \
+  --epochs 200 \
+  --output-dir outputs/overfit/carpk_teacher_fixed_8
+```
+
+完整训练命令：
+
+```bash
+python train_teacher.py --config configs/carpk_teacher_fixed.yaml
+```
+
+开发实验确定训练预算后，正式B0使用全部989张官方训练图。开发阶段13轮约
+为10751次参数更新；正式阶段采用等优化步数原则训练11轮，约10879次更新：
+
+```bash
+python train_teacher.py --config configs/carpk_teacher_fixed_full.yaml
+```
+
+正式模型保存为：
+
+```text
+outputs/carpk/b0_teacher_fixed_sigma8_full/final.pth
 ```
 
 ### 阶段 B：独立训练学生基线
 
 使用相同数据、标签、增强、epoch 和验证规则，只训练 quarter-CSRNet，不加载教师、不使用蒸馏。它回答“模型缩小后本身能达到什么水平”。
 
-规划命令：
+先做结构检查和8张图过拟合：
 
 ```bash
-python train_student.py --config configs/carpk_baseline.yaml
+python check_models.py --device cpu
+
+python train_student.py \
+  --config configs/carpk_student_fixed.yaml \
+  --overfit-samples 8 \
+  --epochs 200 \
+  --output-dir outputs/overfit/b1_student_fixed_8
+```
+
+确认小样本能够拟合后，进行B1完整开发训练：
+
+```bash
+python train_student.py --config configs/carpk_student_fixed.yaml
+```
+
+测试B1最佳验证权重：
+
+```bash
+python evaluate_student.py \
+  --config configs/carpk_student_fixed.yaml \
+  --checkpoint outputs/carpk/b1_student_fixed_sigma8/best_mae.pth \
+  --split test \
+  --output-dir outputs/carpk/b1_student_fixed_sigma8/test \
+  --save-visualizations 20 \
+  --save-worst-visualizations 20
 ```
 
 ### 阶段 C：蒸馏训练学生
@@ -337,26 +385,43 @@ bbox 尺度核 + 小目标加权局部特征蒸馏
 -> 保存逐图 CSV、热力图和汇总指标
 ```
 
-规划命令：
+开发教师测试命令：
 
 ```bash
-python evaluate.py \
-  --config configs/carpk_baseline.yaml \
-  --checkpoint outputs/carpk/student_skt/best_mae.pth \
+python evaluate_teacher.py \
+  --config configs/carpk_teacher_fixed.yaml \
+  --checkpoint outputs/carpk/b0_teacher_fixed_sigma8/best_mae.pth \
   --split test \
-  --save-visualizations 20
+  --output-dir outputs/carpk/b0_teacher_fixed_sigma8/test \
+  --save-visualizations 20 \
+  --save-worst-visualizations 20
+```
+
+正式B0测试命令：
+
+```bash
+python evaluate_teacher.py \
+  --config configs/carpk_teacher_fixed_full.yaml \
+  --checkpoint outputs/carpk/b0_teacher_fixed_sigma8_full/final.pth \
+  --split test \
+  --output-dir outputs/carpk/b0_teacher_fixed_sigma8_full/test \
+  --save-visualizations 20 \
+  --save-worst-visualizations 20
 ```
 
 至少输出：
 
 ```text
 metrics.json
+evaluation_report.json
 per_image_results.csv
-comparison/
-pred_density/
-gt_density/
-run_config.yaml
+visualizations/
+worst_visualizations/
 ```
+
+开发训练目录另外保存 `resolved_config.yaml`、`history.csv`、`last.pth`、
+`best_mae.pth` 和 `training_summary.json`；正式训练目录保存 `final.pth`，并在
+逐图CSV中额外记录正密度积分与负密度质量。
 
 指标定义：
 
@@ -454,9 +519,12 @@ python SKT_distill.py A_train.json A_val.json A_test.json \
 1. [已实现] CARPK标注解析器、完整性检查和框可视化。
 2. [已实现] 固定核、自适应核、尺度权重密度标签和积分检查。
 3. [已实现] 按序列划分manifest和CARPK PyTorch Dataset。
-4. [下一步] 实现教师训练、验证和独立测试。
-5. 实现无蒸馏 quarter 学生基线。
-6. 移植并验证原始 SKT 蒸馏。
+4. [已完成] 教师训练、验证、断点恢复和独立测试；当前FP32固定学习率B0
+   测试MAE为8.991、RMSE为10.692。
+5. [已完成] 无蒸馏quarter学生B1；测试MAE为16.270、RMSE为20.737，
+   部署参数量1.018M。
+6. [已实现，待服务器链路检查与训练] B2原始SKT蒸馏，包括输出密度、
+   Dense-FSP和余弦特征监督。
 7. 实现 bbox 尺度核和小目标权重。
 8. 实现加权输出和局部特征蒸馏。
 9. 适配 UAVDT，并按序列完成道路实验。
