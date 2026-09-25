@@ -1,0 +1,75 @@
+# B3-v2：在B2均匀输出蒸馏与B3-v1实例可靠性之间进行残差式混合。
+#
+# 最终空间权重：W = (1 - lambda) * 1 + lambda * R_normalized。
+# lambda=0严格等价于B2，lambda=1等价于B3-v1。本配置使用lambda=0.5，
+# 在保留困难车辆基础教师监督的同时利用实例可靠性调整梯度空间分布。
+
+experiment:
+  name: carpk_b3v2_quarter_student_reliable_skt_blend05_fixed_sigma8_fp32
+  output_dir: outputs/carpk/b3v2_student_reliable_skt_blend05_fixed_sigma8_fp32
+  seed: 42
+  device: cuda:0
+  deterministic: false
+
+data:
+  data_root: data/raw/CARPK/CARPK_devkit/data
+  target_root: data/processed/CARPK/fixed_sigma
+  train_manifest: data/manifests/CARPK/train.json
+  val_manifest: data/manifests/CARPK/val.json
+  test_manifest: data/manifests/CARPK/test.json
+  train_full_manifest: data/manifests/CARPK/train_full.json
+  output_stride: 8
+  batch_size: 1
+  validation_batch_size: 1
+  workers: 4
+  horizontal_flip_probability: 0.5
+
+model:
+  channel_ratio: 4
+
+teacher:
+  checkpoint: outputs/carpk/b0_teacher_fixed_sigma8_fp32_fixed_lr/best_mae.pth
+
+distillation:
+  gt_density_weight: 1.0
+  output_distillation_weight: 1.0
+  fsp_weight: 0.5
+  cosine_weight: 0.5
+  fsp_scales: [3, 2, 1]
+
+reliability:
+  mode: combined
+  tau_map: 0.001803932129405439
+  tau_count: 0.03581738471984863
+  tau_consistency: 0.0009680459334049374
+  minimum: 0.05
+  background_value: 0.05
+  normalize_mean: true
+
+  # B3-v2核心参数。只允许根据验证集选择，不能根据测试集调整。
+  strength: 0.5
+  epsilon: 0.00000001
+
+  instance_mask:
+    sigma_scale: 0.35
+    sigma_min: 0.75
+    sigma_max: 4.0
+    truncate: 2.5
+    epsilon: 0.00000001
+
+training:
+  # B3-v1最佳验证MAE出现在第168轮，因此继续保持200轮，而不是减少轮数。
+  epochs: 200
+  learning_rate: 0.0001
+  weight_decay: 0.0005
+  loss_reduction: batch_mean_sum
+  amp: false
+  print_frequency: 20
+  gradient_clip_norm: null
+  lr_factor: 0.5
+  lr_patience: 1000
+  minimum_learning_rate: 0.0000001
+
+evaluation:
+  save_visualizations: 20
+  save_worst_visualizations: 20

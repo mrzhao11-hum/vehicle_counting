@@ -1,0 +1,88 @@
+# B3-C：实例可靠性SKT蒸馏与图像级相对计数约束的组合实验。
+#
+# 只有在B2-C验证集结果证明计数约束有效后才运行本配置。它用于检验计数约束
+# 能否修正B3可靠性加权导致的整体少计，而不是直接替代B2-C消融。
+
+experiment:
+  name: carpk_b3c_quarter_student_reliable_skt_count_fixed_sigma8_fp32
+  output_dir: outputs/carpk/b3c_student_reliable_skt_count_fixed_sigma8_fp32
+  seed: 42
+  device: cuda:0
+  deterministic: false
+
+data:
+  data_root: data/raw/CARPK/CARPK_devkit/data
+  target_root: data/processed/CARPK/fixed_sigma
+  train_manifest: data/manifests/CARPK/train.json
+  val_manifest: data/manifests/CARPK/val.json
+  test_manifest: data/manifests/CARPK/test.json
+  train_full_manifest: data/manifests/CARPK/train_full.json
+  output_stride: 8
+  batch_size: 1
+  validation_batch_size: 1
+  workers: 4
+  horizontal_flip_probability: 0.5
+
+model:
+  channel_ratio: 4
+
+teacher:
+  # 与B2使用完全相同的冻结教师，避免教师差异影响消融结论。
+  checkpoint: outputs/carpk/b0_teacher_fixed_sigma8_fp32_fixed_lr/best_mae.pth
+
+distillation:
+  # B3总损失：GT + reliable_output + 0.5 * FSP + 0.5 * cosine。
+  gt_density_weight: 1.0
+  output_distillation_weight: 1.0
+  fsp_weight: 0.5
+  cosine_weight: 0.5
+  count_loss_weight: 1.0
+  fsp_scales: [3, 2, 1]
+
+count_loss:
+  offset: 1.0
+  beta: 0.1
+
+reliability:
+  # 正式B3同时使用监督局部误差与水平翻转一致性。消融时可改为
+  # uniform、supervised或consistency，但每个模式必须使用独立输出目录。
+  mode: combined
+
+  # 下面三个尺度来自CARPK验证集的教师可靠性分析，禁止根据测试集修改。
+  tau_map: 0.001803932129405439
+  tau_count: 0.03581738471984863
+  tau_consistency: 0.0009680459334049374
+
+  # 防止困难实例完全失去教师信号；背景保留少量抑制误检的教师监督。
+  minimum: 0.05
+  background_value: 0.05
+
+  # 归一后每张图有效区域的平均权重为1，使B2/B3损失尺度可比。
+  normalize_mean: true
+  # B3-v1完全使用可靠性图；显式记录1.0，保证旧实验可复现。
+  strength: 1.0
+  epsilon: 0.00000001
+
+  instance_mask:
+    # 椭圆高斯只定义误差归属区域，不改变固定sigma=8的GT密度图。
+    sigma_scale: 0.35
+    sigma_min: 0.75
+    sigma_max: 4.0
+    truncate: 2.5
+    epsilon: 0.00000001
+
+training:
+  epochs: 200
+  learning_rate: 0.0001
+  weight_decay: 0.0005
+  loss_reduction: batch_mean_sum
+  amp: false
+  print_frequency: 20
+  gradient_clip_norm: null
+  lr_factor: 0.5
+  lr_patience: 1000
+  minimum_learning_rate: 0.0000001
+
+evaluation:
+  save_visualizations: 20
+  save_worst_visualizations: 20

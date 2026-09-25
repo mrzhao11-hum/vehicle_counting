@@ -1,4 +1,4 @@
-"""B2原始SKT蒸馏的单epoch训练循环。"""
+"""B3实例可靠性引导SKT蒸馏的单epoch训练循环。"""
 
 from __future__ import annotations
 
@@ -10,15 +10,21 @@ import torch
 from torch import nn
 
 from losses import (
+    ReliabilityDistillationConfig,
     SKTFeatureAdapters,
+    build_batch_reliability_maps,
     cosine_feature_loss,
     dense_fsp_loss,
 )
 
-from .common import AverageMeter, CountingAccumulator
+from .common import AverageMeter, CountingAccumulator, extract_density_output
 
 
-def _feature_output(output: object, model_name: str) -> tuple[torch.Tensor, list[torch.Tensor]]:
+def _feature_output(
+    output: object, model_name: str
+) -> tuple[torch.Tensor, list[torch.Tensor]]:
+    """校验教师/学生带中间特征的统一输出格式。"""
+
     if not isinstance(output, dict):
         raise TypeError(f"{model_name}启用return_features后必须返回字典")
     density = output.get("density")
@@ -32,7 +38,7 @@ def _feature_output(output: object, model_name: str) -> tuple[torch.Tensor, list
     return density, features
 
 
-def train_skt_one_epoch(
+def train_reliable_skt_one_epoch(
     *,
     teacher: nn.Module,
     student: nn.Module,
@@ -52,10 +58,17 @@ def train_skt_one_epoch(
     cosine_weight: float,
     count_loss_weight: float,
     fsp_scales: Sequence[int],
+    reliability_config: ReliabilityDistillationConfig,
     gradient_clip_norm: float | None = None,
 ) -> dict[str, float]:
-    """冻结教师，使用SKT损失及可选计数约束训练学生。"""
+    """冻结教师，使用B3可靠性输出蒸馏与原SKT结构损失训练学生。
 
+    与B2唯一的算法差异是``output_distillation_loss``使用空间可靠性图。
+    GT、Dense-FSP、余弦损失及其权重保持不变。需要一致性信号时，冻结教师
+    会对水平翻转图额外前向一次；翻转输出映射回原坐标后再计算局部稳定性。
+    """
+
+    reliability_config.validate()
     teacher.eval()
     student.train()
     adapters.train()
@@ -66,10 +79,15 @@ def train_skt_one_epoch(
     fsp_meter = AverageMeter()
     cosine_meter = AverageMeter()
     count_loss_meter = AverageMeter()
+    raw_map_meter = AverageMeter()
+    normalized_map_meter = AverageMeter()
     time_meter = AverageMeter()
     counts = CountingAccumulator()
     epoch_start = time.perf_counter()
     trainable_parameters = list(chain(student.parameters(), adapters.parameters()))
+    object_reliability_sum = 0.0
+    object_count = 0
+    maximum_normalized_weight = 0.0
 
     for step, batch in enumerate(loader, start=1):
         step_start = time.perf_counter()
@@ -80,17 +98,44 @@ def train_skt_one_epoch(
         ground_truth_count = batch["count"].to(device, non_blocking=True)
 
         optimizer.zero_grad(set_to_none=True)
+
+        # 教师及可靠性图都只提供监督信号。先完成教师前向和可靠性估计，
+        # 避免这些运算进入学生反向图并占用额外显存。
+        with torch.no_grad():
+            with torch.autocast(
+                device_type=device.type,
+                dtype=torch.float16,
+                enabled=amp_enabled,
+            ):
+                teacher_density, teacher_features = _feature_output(
+                    teacher(image, return_features=True), "教师"
+                )
+                transformed_teacher_density = None
+                if reliability_config.needs_consistency_view:
+                    flipped_output = teacher(torch.flip(image, dims=(-1,)))
+                    transformed_teacher_density = torch.flip(
+                        extract_density_output(flipped_output), dims=(-1,)
+                    )
+
+            reliability_map, reliability_statistics = build_batch_reliability_maps(
+                teacher_density=teacher_density.float(),
+                target_density=target.float(),
+                boxes=batch["boxes"],
+                input_size=(int(image.shape[-2]), int(image.shape[-1])),
+                valid_mask=valid_mask.float(),
+                config=reliability_config,
+                transformed_teacher_density=(
+                    transformed_teacher_density.float()
+                    if transformed_teacher_density is not None
+                    else None
+                ),
+            )
+
         with torch.autocast(
             device_type=device.type,
             dtype=torch.float16,
             enabled=amp_enabled,
         ):
-            # 教师只提供监督信号，不保留计算图，也不会更新参数。
-            with torch.no_grad():
-                teacher_density, teacher_features = _feature_output(
-                    teacher(image, return_features=True), "教师"
-                )
-
             student_density, raw_student_features = _feature_output(
                 student(image, return_features=True), "学生"
             )
@@ -102,14 +147,16 @@ def train_skt_one_epoch(
                 weight=weight,
                 valid_mask=valid_mask,
             )
-            # 固定核CARPK的valid_mask全为1；显式使用它可兼容后续UAVDT忽略区。
+            # 可靠性图已经按单图有效区域均值归一到1。这里沿用B2相同的
+            # batch_mean_sum MSE，只把像素权重从均匀分配改成实例可靠性分配。
             output_distillation_loss = density_criterion(
                 student_density,
                 teacher_density,
+                weight=reliability_map,
                 valid_mask=valid_mask,
             )
-            # 原SKT的Dense-FSP包含六个中间特征和最终密度输出，共7个
-            # Tensor、21个两两关系；余弦损失只比较六个中间特征。
+
+            # Dense-FSP和余弦蒸馏与B2完全相同，确保消融只改变输出蒸馏项。
             student_fsp_features = [*aligned_student_features, student_density]
             teacher_fsp_features = [*teacher_features, teacher_density]
             fsp_loss = dense_fsp_loss(
@@ -121,8 +168,8 @@ def train_skt_one_epoch(
                 aligned_student_features,
                 teacher_features,
             )
-            # 密度图积分就是预测计数。该项直接纠正B2/B3中观察到的系统性
-            # 少计，但不能替代GT密度MSE，否则总数正确时空间位置仍可能错误。
+            # 可靠性图只重分配教师输出蒸馏的空间梯度，不能保证整图密度
+            # 积分正确；显式计数项用于纠正实验中持续出现的负偏差。
             if count_loss_weight > 0.0:
                 count_loss = count_criterion(
                     student_density,
@@ -130,7 +177,7 @@ def train_skt_one_epoch(
                     valid_mask=valid_mask,
                 )
             else:
-                # 旧B2配置默认权重为0。此时只保留日志统计，不建立额外反向图。
+                # 权重为0时仅监控相对计数误差，保持旧B3的反向图不变。
                 with torch.no_grad():
                     count_loss = count_criterion(
                         student_density.detach(),
@@ -143,13 +190,12 @@ def train_skt_one_epoch(
                 + fsp_weight * fsp_loss
                 + cosine_weight * cosine_loss
             )
-            # 权重为0时不进行额外浮点加法，确保原B2配置严格保持原目标函数。
             if count_loss_weight > 0.0:
                 total_loss = total_loss + count_loss_weight * count_loss
 
         if not torch.isfinite(total_loss):
             raise FloatingPointError(
-                f"epoch={epoch} step={step}出现非有限蒸馏损失："
+                f"epoch={epoch} step={step}出现非有限B3损失："
                 f"total={total_loss.detach().float().item()}"
             )
 
@@ -162,7 +208,7 @@ def train_skt_one_epoch(
         scaler.step(optimizer)
         scaler.update()
 
-        batch_size = image.shape[0]
+        batch_size = int(image.shape[0])
         total_meter.update(total_loss.detach().float().item(), batch_size)
         gt_meter.update(gt_density_loss.detach().float().item(), batch_size)
         output_meter.update(
@@ -171,6 +217,21 @@ def train_skt_one_epoch(
         fsp_meter.update(fsp_loss.detach().float().item(), batch_size)
         cosine_meter.update(cosine_loss.detach().float().item(), batch_size)
         count_loss_meter.update(count_loss.detach().float().item(), batch_size)
+        raw_map_meter.update(reliability_statistics["raw_map_mean"], batch_size)
+        normalized_map_meter.update(
+            reliability_statistics["normalized_map_mean"], batch_size
+        )
+        current_object_count = int(reliability_statistics["object_count"])
+        object_reliability_sum += (
+            reliability_statistics["object_reliability_mean"]
+            * current_object_count
+        )
+        object_count += current_object_count
+        maximum_normalized_weight = max(
+            maximum_normalized_weight,
+            reliability_statistics["maximum_normalized_weight"],
+        )
+
         predicted_count = student_density.detach().float().sum(dim=(1, 2, 3))
         counts.update(predicted_count, ground_truth_count)
         time_meter.update(time.perf_counter() - step_start)
@@ -179,14 +240,19 @@ def train_skt_one_epoch(
             step == 1 or step % print_frequency == 0 or step == len(loader)
         ):
             current_metrics = counts.compute()
+            current_object_mean = (
+                object_reliability_sum / object_count if object_count else 0.0
+            )
             print(
                 f"epoch={epoch:03d} step={step:04d}/{len(loader):04d} "
                 f"total={total_meter.average:.6f} "
                 f"gt={gt_meter.average:.6f} "
-                f"out={output_meter.average:.6f} "
+                f"out_rel={output_meter.average:.6f} "
                 f"fsp={fsp_meter.average:.6f} "
                 f"cos={cosine_meter.average:.6f} "
                 f"count_loss={count_loss_meter.average:.6f} "
+                f"rel_obj={current_object_mean:.3f} "
+                f"rel_norm={normalized_map_meter.average:.3f} "
                 f"count_mae={current_metrics['mae']:.3f} "
                 f"time={time_meter.average:.3f}s/batch"
             )
@@ -200,10 +266,16 @@ def train_skt_one_epoch(
             "fsp_loss": fsp_meter.average,
             "cosine_loss": cosine_meter.average,
             "count_loss": count_loss_meter.average,
+            "object_reliability_mean": (
+                object_reliability_sum / object_count if object_count else 0.0
+            ),
+            "reliability_raw_map_mean": raw_map_meter.average,
+            "reliability_normalized_map_mean": normalized_map_meter.average,
+            "maximum_normalized_weight": maximum_normalized_weight,
             "epoch_seconds": time.perf_counter() - epoch_start,
         }
     )
     return metrics
 
 
-__all__ = ["train_skt_one_epoch"]
+__all__ = ["train_reliable_skt_one_epoch"]
